@@ -1,0 +1,26 @@
+[Unit]
+Description=RemotePlay Relay Signaling Server
+After=network.target postgresql.service coturn.service
+
+[Service]
+Type=simple
+User=relay
+Group=relay
+WorkingDirectory=/opt/relay
+ExecStart=/opt/relay/relay-server
+Restart=on-failure
+RestartSec=5
+
+# Environment
+EnvironmentFile=/opt/relay/.env
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+
+# Limits
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

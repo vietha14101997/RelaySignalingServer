@@ -1,0 +1,23 @@
+# Binaries
+relay-server
+relay-server.exe
+relay-server.exe~
+server.exe
+*.exe
+*.exe~
+
+# TLS
+*.pem
+*.key
+
+# Environment
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
