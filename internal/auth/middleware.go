@@ -29,6 +29,22 @@ func JWTMiddleware(jwtService *JWTService) echo.MiddlewareFunc {
 	}
 }
 
+// OptionalJWTMiddleware parses JWT if present but does NOT reject unauthenticated requests.
+// Sets ContextUserID if token is valid, otherwise continues without it.
+func OptionalJWTMiddleware(jwtService *JWTService) echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			tokenString := extractToken(c)
+			if tokenString != "" {
+				if claims, err := jwtService.ValidateToken(tokenString); err == nil {
+					c.Set(ContextUserID, claims.UserID)
+				}
+			}
+			return next(c)
+		}
+	}
+}
+
 func extractToken(c echo.Context) string {
 	// 1. Check Authorization header
 	auth := c.Request().Header.Get("Authorization")

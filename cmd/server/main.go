@@ -112,7 +112,7 @@ func main() {
 		roomProtected.POST("/rooms/create", roomHandler.Create)
 		roomProtected.POST("/rooms/set-password", roomHandler.SetPassword)
 	}
-	e.POST("/rooms/join", roomHandler.Join, ratelimit.Middleware(roomLimiter))
+	e.POST("/rooms/join", roomHandler.Join, auth.OptionalJWTMiddleware(jwtService), ratelimit.Middleware(roomLimiter))
 	e.GET("/rooms/:id/info", roomHandler.GetInfo)
 	e.GET("/ws/room", roomHandler.HandleRoomWS)
 

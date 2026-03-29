@@ -98,8 +98,8 @@ type joinRequest struct {
 
 func (h *Handler) Join(c echo.Context) error {
 	var req joinRequest
-	if err := c.Bind(&req); err != nil || req.RoomID == "" || req.Password == "" {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "room_id and password required"})
+	if err := c.Bind(&req); err != nil || req.RoomID == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "room_id required"})
 	}
 
 	// Normalize: remove dashes/spaces
@@ -110,19 +110,25 @@ func (h *Handler) Join(c echo.Context) error {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "room not found"})
 	}
 
-	// Verify password
-	if err := bcrypt.CompareHashAndPassword([]byte(room.PasswordHash), []byte(req.Password)); err != nil {
-		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "invalid password"})
+	// Check if caller is the room owner (same account) — skip password
+	userID := ""
+	if uid, ok := c.Get(auth.ContextUserID).(string); ok {
+		userID = uid
+	}
+	isOwner := userID != "" && room.OwnerUserID == userID
+
+	// Verify password (skip for room owner)
+	if !isOwner {
+		if req.Password == "" {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "password required"})
+		}
+		if err := bcrypt.CompareHashAndPassword([]byte(room.PasswordHash), []byte(req.Password)); err != nil {
+			return c.JSON(http.StatusUnauthorized, map[string]string{"error": "invalid password"})
+		}
 	}
 
 	if room.IsFull() {
 		return c.JSON(http.StatusConflict, map[string]string{"error": "room is full"})
-	}
-
-	// Determine role: check if request has JWT (logged-in user) or guest
-	userID := ""
-	if uid, ok := c.Get(auth.ContextUserID).(string); ok {
-		userID = uid
 	}
 
 	role := room.DetermineRole(userID)

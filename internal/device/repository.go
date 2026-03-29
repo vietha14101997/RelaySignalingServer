@@ -23,7 +23,9 @@ type Device struct {
 	HWInfo       json.RawMessage `json:"hw_info,omitempty"`
 	RegisteredAt time.Time       `json:"registered_at"`
 	LastSeenAt   time.Time       `json:"last_seen_at"`
-	Online       bool            `json:"online"` // populated from in-memory state
+	Online       bool            `json:"online"`                  // populated from in-memory state
+	RoomID       string          `json:"room_id,omitempty"`       // populated from DeviceHub
+	DisplayID    string          `json:"display_id,omitempty"`    // formatted room_id (e.g. "ABC-DEF")
 }
 
 type Repository struct {

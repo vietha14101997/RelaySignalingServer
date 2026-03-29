@@ -60,9 +60,17 @@ func (h *Handler) List(c echo.Context) error {
 		devices = []Device{}
 	}
 
-	// Enrich with online status from DeviceHub
+	// Enrich with online status + room info from DeviceHub
 	for i := range devices {
 		devices[i].Online = h.deviceHub.IsOnline(devices[i].ID)
+		if room := h.deviceHub.GetRoomByDevice(devices[i].ID); room != nil {
+			devices[i].RoomID = room.ID
+			if len(room.ID) == 6 {
+				devices[i].DisplayID = room.ID[:3] + "-" + room.ID[3:]
+			} else {
+				devices[i].DisplayID = room.ID
+			}
+		}
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{

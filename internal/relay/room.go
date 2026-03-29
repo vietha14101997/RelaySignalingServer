@@ -132,13 +132,13 @@ func (r *Room) DetermineRole(userID string) ClientRole {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	// User room: owner = host
+	// User room: owner account = host
 	if r.OwnerUserID != "" && userID == r.OwnerUserID {
 		return RoleHost
 	}
 
-	// Guest room: first client = host
-	if r.OwnerUserID == "" && len(r.Clients) == 0 {
+	// First client to join any room = host (regardless of account)
+	if len(r.Clients) == 0 {
 		return RoleHost
 	}
 
