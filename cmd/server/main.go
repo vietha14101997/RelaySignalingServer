@@ -16,6 +16,7 @@ import (
 	"github.com/reka/relay-server/internal/config"
 	"github.com/reka/relay-server/internal/database"
 	"github.com/reka/relay-server/internal/device"
+	"github.com/reka/relay-server/internal/diagnose"
 	"github.com/reka/relay-server/internal/health"
 	"github.com/reka/relay-server/internal/guest"
 	"github.com/reka/relay-server/internal/ratelimit"
@@ -115,6 +116,10 @@ func main() {
 	e.POST("/rooms/join", roomHandler.Join, auth.OptionalJWTMiddleware(jwtService), ratelimit.Middleware(roomLimiter))
 	e.GET("/rooms/:id/info", roomHandler.GetInfo)
 	e.GET("/ws/room", roomHandler.HandleRoomWS)
+
+	// Diagnose endpoint (admin token required; set RELAY_ADMIN_TOKEN to enable)
+	diagnoseHandler := diagnose.NewHandler(deviceHub, cfg.AdminToken)
+	e.GET("/diagnose/:room_id", diagnoseHandler.Diagnose)
 
 	// Always available: Phase 1 simple relay (no auth needed in dev mode)
 	e.GET("/ws", legacyWSHandler.HandleWebSocket)

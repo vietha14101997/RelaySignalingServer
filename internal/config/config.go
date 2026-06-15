@@ -27,6 +27,9 @@ type Config struct {
 	STUNPort   int    // default 3478
 	TURNSPort  int    // default 5349 (TLS)
 	TURNCredTTL time.Duration // credential TTL, default 24h
+
+	// Admin token for diagnostics endpoint (empty = disabled)
+	AdminToken string
 }
 
 func Load() *Config {
@@ -67,6 +70,9 @@ func Load() *Config {
 	}
 	if d := os.Getenv("TURN_DOMAIN"); d != "" {
 		cfg.TURNDomain = d
+	}
+	if t := os.Getenv("RELAY_ADMIN_TOKEN"); t != "" {
+		cfg.AdminToken = t
 	}
 
 	return cfg
