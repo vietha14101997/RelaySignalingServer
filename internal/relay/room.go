@@ -15,7 +15,7 @@ type RoomState string
 const (
 	RoomIdle        RoomState = "idle"
 	RoomConfiguring RoomState = "configuring"
-	RoomStreaming    RoomState = "streaming"
+	RoomStreaming   RoomState = "streaming"
 )
 
 type ClientRole string
@@ -125,6 +125,15 @@ func (r *Room) GetState() RoomState {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.State
+}
+
+// WithReadLock runs fn while holding the room's read lock. Lets callers in
+// other packages (e.g. internal/diagnose) take a consistent multi-field
+// snapshot (State + Clients together) without exposing the mutex itself.
+func (r *Room) WithReadLock(fn func()) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	fn()
 }
 
 // DetermineRole assigns host to first joiner in guest room, or to account owner in user room.

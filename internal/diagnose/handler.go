@@ -13,8 +13,9 @@ import (
 // Authorization header (Bearer scheme) or ?token=... query param.
 //
 // Example:
-//   curl -H "Authorization: Bearer $RELAY_ADMIN_TOKEN" \
-//     https://relay.example.com/diagnose/ABC123
+//
+//	curl -H "Authorization: Bearer $RELAY_ADMIN_TOKEN" \
+//	  https://relay.example.com/diagnose/ABC123
 type Handler struct {
 	deviceHub  *relay.DeviceHub
 	adminToken string
@@ -44,23 +45,27 @@ func (h *Handler) Diagnose(c echo.Context) error {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "room not found or expired"})
 	}
 
-	// Snapshot under read lock
-	room.mu.RLock()
-	clients := make([]map[string]interface{}, 0, len(room.Clients))
-	for _, cl := range room.Clients {
-		clients = append(clients, map[string]interface{}{
-			"client_id":    cl.ID,
-			"role":         string(cl.Role),
-			"joined_at":    cl.JoinedAt,
-			"input_allowed": cl.InputAllowed,
-			"uptime_secs":  int(time.Since(cl.JoinedAt).Seconds()),
-		})
-	}
-	state := string(room.State)
+	// Snapshot under read lock (via exported helper — room.mu is private to
+	// the relay package, see relay.Room.WithReadLock)
+	var clients []map[string]interface{}
+	var state string
+	var clientCount int
+	room.WithReadLock(func() {
+		clients = make([]map[string]interface{}, 0, len(room.Clients))
+		for _, cl := range room.Clients {
+			clients = append(clients, map[string]interface{}{
+				"client_id":     cl.ID,
+				"role":          string(cl.Role),
+				"joined_at":     cl.JoinedAt,
+				"input_allowed": cl.InputAllowed,
+				"uptime_secs":   int(time.Since(cl.JoinedAt).Seconds()),
+			})
+		}
+		state = string(room.State)
+		clientCount = len(room.Clients)
+	})
 	createdAt := room.CreatedAt
 	uptimeSecs := int(time.Since(createdAt).Seconds())
-	clientCount := len(room.Clients)
-	room.mu.RUnlock()
 
 	// Optional ICE summary from server / clients
 	// Clients can publish via WS message: { "type": "ice_summary", "role": "host|viewer", "h":N, "s":N, "r":N, "p":N, "gather_ms":N, "ts":"ISO" }
