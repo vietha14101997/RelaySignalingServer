@@ -17,8 +17,8 @@ import (
 	"github.com/reka/relay-server/internal/database"
 	"github.com/reka/relay-server/internal/device"
 	"github.com/reka/relay-server/internal/diagnose"
-	"github.com/reka/relay-server/internal/health"
 	"github.com/reka/relay-server/internal/guest"
+	"github.com/reka/relay-server/internal/health"
 	"github.com/reka/relay-server/internal/ratelimit"
 	"github.com/reka/relay-server/internal/relay"
 	"github.com/reka/relay-server/internal/room"
@@ -49,7 +49,7 @@ func main() {
 
 	// Services
 	hub := relay.NewHub()
-	deviceHub := relay.NewDeviceHub()
+	deviceHub := relay.NewDeviceHubWithGrace(cfg.SessionGrace, cfg.MaxStaleSessions)
 	jwtService := auth.NewJWTService(cfg.JWTSecret, cfg.AccessTokenTTL)
 	wsHandler := relay.NewWSHandler(deviceHub, cfg.MaxMessageSize)
 	legacyWSHandler := relay.NewHandler(hub, cfg.MaxMessageSize)

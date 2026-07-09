@@ -38,7 +38,17 @@ func (h *WSHandler) HandleServerWS(c echo.Context) error {
 		return err
 	}
 
-	server := h.deviceHub.AddServer(deviceID, userID, ws)
+	// AddServer rejects the connection (ErrNotOwner) if a server-stale session
+	// for this device is owned by a different JWT user (F12b: rebind during
+	// grace must re-auth AND match the bound device/user — grace is not a
+	// free-auth window).
+	server, err := h.deviceHub.AddServer(deviceID, userID, ws)
+	if err != nil {
+		log.Printf("[WS/Server] Rejected device=%s user=%s: %v", deviceID, userID, err)
+		ws.WriteMessage(websocket.TextMessage, mustJSON(map[string]string{"type": "error", "error": "not authorized for this device"}))
+		ws.Close()
+		return nil
+	}
 
 	// Read pump — route server messages to room clients
 	h.serverReadPump(server)
@@ -48,7 +58,11 @@ func (h *WSHandler) HandleServerWS(c echo.Context) error {
 
 func (h *WSHandler) serverReadPump(server *OnlineServer) {
 	defer func() {
-		h.deviceHub.RemoveServer(server.DeviceID)
+		// RemoveServerConn (not RemoveServer) — only tears down / starts grace
+		// if `server` is still the currently-registered connection for its
+		// device. Guards against a race where a faster reconnect has already
+		// replaced it (must not disturb the newer connection).
+		h.deviceHub.RemoveServerConn(server)
 		log.Printf("[WS/Server] Device %s read pump ended", server.DeviceID)
 	}()
 
@@ -143,14 +157,16 @@ func (h *WSHandler) HandleClientWS(c echo.Context) error {
 	conn := NewConnection(ws, RoleClient, sessionID)
 	go conn.WritePump()
 
-	h.deviceHub.SetSessionClient(sessionID, conn)
+	serverConn, _ := h.deviceHub.SetSessionClient(sessionID, conn)
 
 	conn.Send(Message{
 		Type: websocket.TextMessage,
 		Data: mustJSON(map[string]string{"type": "room_ready", "session_id": sessionID}),
 	})
-	if sess.ServerConn != nil {
-		sess.ServerConn.SendJSON(map[string]string{"type": "room_ready", "session_id": sessionID})
+	// R3: use the ServerConn snapshot captured under the lock, not a fresh
+	// unsynchronized read of sess.ServerConn (races server resume).
+	if serverConn != nil {
+		serverConn.SendJSON(map[string]string{"type": "room_ready", "session_id": sessionID})
 	}
 
 	log.Printf("[WS/Client] Client joined session %s", sessionID)
@@ -161,13 +177,14 @@ func (h *WSHandler) HandleClientWS(c echo.Context) error {
 
 func (h *WSHandler) clientReadPump(conn *Connection, sessionID string) {
 	defer func() {
-		sess := h.deviceHub.GetSession(sessionID)
-		if sess != nil && sess.ServerConn != nil {
-			sess.ServerConn.SendJSON(map[string]string{"type": "peer_disconnected"})
-		}
-		h.deviceHub.RemoveSession(sessionID)
+		// F2: don't tear down eagerly — mark the session client-stale and let
+		// the grace timer decide. If the client reconnects with ?session=
+		// within the grace window (HandleClientWS -> SetSessionClient), the
+		// timer is cancelled and no peer_disconnected is ever sent. Otherwise
+		// the timer runs the equivalent of the old immediate teardown.
+		h.deviceHub.MarkClientStale(sessionID)
 		conn.Close()
-		log.Printf("[WS/Client] Client disconnected from session %s", sessionID)
+		log.Printf("[WS/Client] Client disconnected from session %s (grace started)", sessionID)
 	}()
 
 	conn.Conn.SetReadLimit(h.maxMessageSize)

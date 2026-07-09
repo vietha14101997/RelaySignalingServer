@@ -13,6 +13,12 @@ type Config struct {
 	MaxMessageSize  int64
 	RoomIdleTimeout int // seconds
 
+	// Phase 2 signaling resilience: WS-drop grace period before a stale
+	// session (client or server side disconnected) is torn down, and a cap
+	// on concurrently-stale sessions (bounds memory + hijack surface, F12d).
+	SessionGrace     time.Duration
+	MaxStaleSessions int
+
 	// Database (empty = dev mode, no DB required)
 	DatabaseURL string
 
@@ -22,10 +28,10 @@ type Config struct {
 	RefreshTokenTTL time.Duration
 
 	// TURN/STUN (coturn)
-	TURNSecret string // shared secret with coturn (use-auth-secret)
-	TURNDomain string // public domain/IP for STUN/TURN URLs
-	STUNPort   int    // default 3478
-	TURNSPort  int    // default 5349 (TLS)
+	TURNSecret  string        // shared secret with coturn (use-auth-secret)
+	TURNDomain  string        // public domain/IP for STUN/TURN URLs
+	STUNPort    int           // default 3478
+	TURNSPort   int           // default 5349 (TLS)
 	TURNCredTTL time.Duration // credential TTL, default 24h
 
 	// Admin token for diagnostics endpoint (empty = disabled)
@@ -34,18 +40,20 @@ type Config struct {
 
 func Load() *Config {
 	cfg := &Config{
-		Port:            8443,
-		MaxMessageSize:  64 << 20, // 64MB (speed test sends large binary frames)
-		RoomIdleTimeout: 300,     // 5 minutes
-		DatabaseURL:     "", // empty = dev mode (no DB)
-		JWTSecret:       "change-me-in-production",
-		AccessTokenTTL:  15 * time.Minute,
-		RefreshTokenTTL: 30 * 24 * time.Hour, // 30 days
-		TURNSecret:      "",
-		TURNDomain:      "",
-		STUNPort:        3478,
-		TURNSPort:       5349,
-		TURNCredTTL:     24 * time.Hour,
+		Port:             8443,
+		MaxMessageSize:   64 << 20, // 64MB (speed test sends large binary frames)
+		RoomIdleTimeout:  300,      // 5 minutes
+		SessionGrace:     30 * time.Second,
+		MaxStaleSessions: 100,
+		DatabaseURL:      "", // empty = dev mode (no DB)
+		JWTSecret:        "change-me-in-production",
+		AccessTokenTTL:   15 * time.Minute,
+		RefreshTokenTTL:  30 * 24 * time.Hour, // 30 days
+		TURNSecret:       "",
+		TURNDomain:       "",
+		STUNPort:         3478,
+		TURNSPort:        5349,
+		TURNCredTTL:      24 * time.Hour,
 	}
 
 	if p := os.Getenv("RELAY_PORT"); p != "" {
@@ -73,6 +81,16 @@ func Load() *Config {
 	}
 	if t := os.Getenv("RELAY_ADMIN_TOKEN"); t != "" {
 		cfg.AdminToken = t
+	}
+	if s := os.Getenv("SESSION_GRACE"); s != "" {
+		if secs, err := strconv.Atoi(s); err == nil && secs > 0 {
+			cfg.SessionGrace = time.Duration(secs) * time.Second
+		}
+	}
+	if s := os.Getenv("MAX_STALE_SESSIONS"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			cfg.MaxStaleSessions = n
+		}
 	}
 
 	return cfg

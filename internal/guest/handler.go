@@ -143,15 +143,16 @@ func (h *Handler) HandleGuestWS(c echo.Context) error {
 	conn := relay.NewConnection(ws, relay.RoleClient, sessionID)
 	go conn.WritePump()
 
-	h.deviceHub.SetSessionClient(sessionID, conn)
+	serverConn, _ := h.deviceHub.SetSessionClient(sessionID, conn)
 
-	// Notify both sides
+	// Notify both sides. Use the ServerConn snapshot captured under the lock
+	// (R3) rather than an unsynchronized read of sess.ServerConn.
 	conn.Send(relay.Message{
 		Type: websocket.TextMessage,
 		Data: mustJSON(map[string]string{"type": "room_ready", "session_id": sessionID}),
 	})
-	if sess.ServerConn != nil {
-		sess.ServerConn.SendJSON(map[string]string{"type": "room_ready", "session_id": sessionID})
+	if serverConn != nil {
+		serverConn.SendJSON(map[string]string{"type": "room_ready", "session_id": sessionID})
 	}
 
 	log.Printf("[WS/Guest] Client joined session %s", sessionID)
