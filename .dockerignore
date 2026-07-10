@@ -1,0 +1,9 @@
+# Build context = RelaySignalingServer/. Keep only what the Go build needs.
+.git
+deploy/
+*.md
+*.log
+relay-server
+relay-server.exe
+.env
+.env.*

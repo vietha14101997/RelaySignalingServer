@@ -1,0 +1,84 @@
+name: remotescreen-relay
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [backend]
+
+  relay:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: remotescreen/relay:latest
+    restart: unless-stopped
+    environment:
+      RELAY_PORT: "8443"
+      DATABASE_URL: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable"
+      JWT_SECRET: ${JWT_SECRET}
+      TURN_SECRET: ${TURN_SECRET}
+      TURN_DOMAIN: ${TURN_DOMAIN}
+      RELAY_ADMIN_TOKEN: ${RELAY_ADMIN_TOKEN:-}
+      SESSION_GRACE: ${SESSION_GRACE:-30}
+      MAX_STALE_SESSIONS: ${MAX_STALE_SESSIONS:-100}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [backend]
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"   # HTTP/3
+    environment:
+      RELAY_DOMAIN: ${RELAY_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - relay
+    networks: [backend]
+
+  # coturn uses the host network stack: a TURN relay allocates a wide UDP port
+  # range, which is painful to publish through Docker's bridge NAT. Host mode
+  # lets it bind 3478/5349 + the relay range directly (firewall opens them).
+  coturn:
+    image: coturn/coturn:4.6-alpine
+    restart: unless-stopped
+    network_mode: host
+    user: root
+    entrypoint: ["/bin/sh", "/etc/coturn/entrypoint.sh"]
+    environment:
+      TURN_SECRET: ${TURN_SECRET}
+      TURN_DOMAIN: ${TURN_DOMAIN}
+      EXTERNAL_IP: ${EXTERNAL_IP:-}
+    volumes:
+      - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+      - ./coturn/entrypoint.sh:/etc/coturn/entrypoint.sh:ro
+      - caddy_data:/caddy-data:ro      # read Caddy's issued cert for turns:5349
+      - coturn_certs:/etc/coturn/certs
+
+volumes:
+  pg_data:
+  caddy_data:
+  caddy_config:
+  coturn_certs:
+
+networks:
+  backend:

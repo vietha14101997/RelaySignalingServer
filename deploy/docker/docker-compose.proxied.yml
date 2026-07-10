@@ -1,0 +1,21 @@
+# Override for a VPS that ALREADY runs a reverse proxy (nginx/Caddy/Traefik) on
+# 80/443. Keeps the relay off those ports so it never fights the existing app.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.proxied.yml up -d --build
+#
+# - Bundled Caddy is disabled (parked under an inactive profile).
+# - Relay is published ONLY on loopback 127.0.0.1:${RELAY_HOST_PORT:-8443};
+#   your existing proxy reverse-proxies https://<domain> → 127.0.0.1:8443
+#   (WebSocket upgrades included). See README for nginx/Caddy snippets.
+# - coturn: with Caddy off there is no bundled cert, so coturn serves PLAIN TURN
+#   (3478 udp/tcp) — enough for NAT traversal. For turns:5349, bind your existing
+#   proxy's cert into coturn (README) and restart it.
+services:
+  caddy:
+    # A profile that is never activated → compose excludes this service.
+    profiles: ["disabled"]
+
+  relay:
+    # Expose to the host loopback only; the host's proxy reaches it here.
+    ports:
+      - "127.0.0.1:${RELAY_HOST_PORT:-8443}:8443"

@@ -1,0 +1,14 @@
+# Caddy = TLS terminator + reverse proxy for the relay.
+# Automatic HTTPS (Let's Encrypt) for {$RELAY_DOMAIN}; WebSocket upgrades pass
+# through reverse_proxy transparently, so wss://<domain>/ws/* just works.
+
+{
+	# ACME contact (optional but recommended). Empty = anonymous LE/ZeroSSL.
+	email {$ACME_EMAIL}
+}
+
+{$RELAY_DOMAIN} {
+	encode zstd gzip
+	# Relay listens plain HTTP inside the compose network.
+	reverse_proxy relay:8443
+}
