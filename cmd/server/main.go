@@ -23,6 +23,7 @@ import (
 	"github.com/reka/relay-server/internal/relay"
 	"github.com/reka/relay-server/internal/room"
 	"github.com/reka/relay-server/internal/session"
+	"github.com/reka/relay-server/internal/telemetry"
 	"github.com/reka/relay-server/internal/turn"
 )
 
@@ -121,6 +122,17 @@ func main() {
 	diagnoseHandler := diagnose.NewHandler(deviceHub, cfg.AdminToken)
 	e.GET("/diagnose/:room_id", diagnoseHandler.Diagnose)
 
+	// Connection telemetry (P6 minimal): client reports {selected_pair_type,
+	// address_family} on connect → measure real P2P direct-connection rate.
+	// Public + rate-limited ingest; admin-gated stats read.
+	telemetryHandler := telemetry.NewHandler(cfg.AdminToken)
+	telemetryLimiter := ratelimit.New(30, time.Minute)
+	// M1: cap the public ingest body — a single giant JSON would otherwise OOM the
+	// decoder before the rate limiter helps.
+	e.POST("/telemetry/connection", telemetryHandler.Report,
+		middleware.BodyLimit("1KB"), ratelimit.Middleware(telemetryLimiter))
+	e.GET("/telemetry/stats", telemetryHandler.Stats)
+
 	// Always available: Phase 1 simple relay (no auth needed in dev mode)
 	e.GET("/ws", legacyWSHandler.HandleWebSocket)
 
@@ -132,6 +144,10 @@ func main() {
 			hub.CleanupStaleRooms(time.Duration(cfg.RoomIdleTimeout) * time.Second)
 			deviceHub.CleanupStaleSessions(5 * time.Minute)
 			guestLimiter.Cleanup()
+			roomLimiter.Cleanup()
+			// H1: the public /telemetry/connection endpoint leaves a per-IP limiter
+			// entry per source; without periodic cleanup the map grows unbounded.
+			telemetryLimiter.Cleanup()
 		}
 	}()
 
