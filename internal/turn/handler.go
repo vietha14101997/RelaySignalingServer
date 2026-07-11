@@ -56,10 +56,6 @@ func (h *Handler) getIceServersForUser(c echo.Context, userID string) error {
 			URLs: []string{
 				fmt.Sprintf("turn:%s:%d?transport=udp", h.cfg.TURNDomain, h.cfg.STUNPort),
 				fmt.Sprintf("turn:%s:%d?transport=tcp", h.cfg.TURNDomain, h.cfg.STUNPort),
-				// Port 443/TCP: mobile carriers throttle UDP/TCP 3478 (observed on
-				// Viettel 4G) but never touch the HTTPS port. coturn listens there
-				// via alt-listening-port=443.
-				fmt.Sprintf("turn:%s:443?transport=tcp", h.cfg.TURNDomain),
 			},
 			Username:   username,
 			Credential: credential,
