@@ -8,17 +8,30 @@ import (
 )
 
 type Handler struct {
-	hub       *relay.Hub
-	deviceHub *relay.DeviceHub
+	hub         *relay.Hub
+	deviceHub   *relay.DeviceHub
+	authEnabled bool
+	turnEnabled bool
 }
 
-func NewHandler(hub *relay.Hub, deviceHub *relay.DeviceHub) *Handler {
-	return &Handler{hub: hub, deviceHub: deviceHub}
+func NewHandler(hub *relay.Hub, deviceHub *relay.DeviceHub, authEnabled, turnEnabled bool) *Handler {
+	return &Handler{
+		hub:         hub,
+		deviceHub:   deviceHub,
+		authEnabled: authEnabled,
+		turnEnabled: turnEnabled,
+	}
 }
 
 func (h *Handler) HealthCheck(c echo.Context) error {
+	status := "ok"
+	if !h.authEnabled {
+		status = "degraded"
+	}
 	result := map[string]interface{}{
-		"status": "ok",
+		"status":       status,
+		"auth_enabled": h.authEnabled,
+		"turn_enabled": h.turnEnabled,
 	}
 
 	if h.hub != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -55,7 +56,12 @@ func main() {
 	wsHandler := relay.NewWSHandler(deviceHub, cfg.MaxMessageSize)
 	legacyWSHandler := relay.NewHandler(hub, cfg.MaxMessageSize)
 	turnHandler := turn.NewHandler(cfg)
-	healthHandler := health.NewHandler(hub, deviceHub)
+	healthHandler := health.NewHandler(
+		hub,
+		deviceHub,
+		pool != nil,
+		cfg.TURNSecret != "" && cfg.TURNDomain != "",
+	)
 
 	e := echo.New()
 	e.HideBanner = true
@@ -89,6 +95,8 @@ func main() {
 		protected.GET("/ice-servers", turnHandler.GetIceServers)
 		protected.GET("/ws/server", wsHandler.HandleServerWS)
 		protected.GET("/ws/client", wsHandler.HandleClientWS)
+	} else {
+		registerUnavailableAuthRoutes(e)
 	}
 
 	// Guest access (no JWT needed for session/ws, but register needs JWT)
@@ -179,4 +187,16 @@ func main() {
 		log.Fatalf("Shutdown error: %v", err)
 	}
 	log.Println("Server stopped gracefully")
+}
+
+func registerUnavailableAuthRoutes(e *echo.Echo) {
+	authUnavailable := func(c echo.Context) error {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{
+			"error": "authentication unavailable: database is not configured",
+		})
+	}
+	e.POST("/auth/register", authUnavailable)
+	e.POST("/auth/login", authUnavailable)
+	e.POST("/auth/refresh", authUnavailable)
+	e.POST("/auth/logout", authUnavailable)
 }
