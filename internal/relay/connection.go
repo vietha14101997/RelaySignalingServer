@@ -78,31 +78,26 @@ func (c *Connection) WritePump() {
 
 func (c *Connection) Send(msg Message) bool {
 	c.mu.Lock()
-	if c.gracefulClosing {
-		c.mu.Unlock()
+	defer c.mu.Unlock()
+	if c.closed || c.gracefulClosing {
 		return false
-	}
-	select {
-	case <-c.done:
-		c.mu.Unlock()
-		return false
-	default:
 	}
 
 	select {
 	case c.send <- msg:
-		c.mu.Unlock()
 		return true
-	case <-c.done:
-		c.mu.Unlock()
-		return false
 	default:
-		// Buffer full, drop connection
-		conn := c.closeLocked()
-		c.mu.Unlock()
-		closeWebSocket(conn)
+	}
+
+	// Buffer full: drop the connection. Re-check the close decision under
+	// the lock so a concurrent SendAndClose that committed in the
+	// meantime is not overwritten by a redundant socket close.
+	if c.closed || c.gracefulClosing {
 		return false
 	}
+	conn := c.closeLocked()
+	closeWebSocket(conn)
+	return false
 }
 
 // SendAndClose waits for the writer pump to flush a final message before it
@@ -110,21 +105,25 @@ func (c *Connection) Send(msg Message) bool {
 func (c *Connection) SendAndClose(msg Message) bool {
 	msg.closeAfter = true
 	msg.writeResult = make(chan bool)
+
 	c.mu.Lock()
-	if c.gracefulClosing {
+	// Atomic close-or-enqueue decision: once we commit to enqueueing the
+	// final frame, gracefulClosing is set and Close becomes a no-op. A
+	// concurrent Close that already committed is visible via c.closed and
+	// rejects the caller without enqueueing — room_closed cannot be
+	// enqueued after the close decision.
+	if c.closed || c.gracefulClosing {
 		c.mu.Unlock()
 		return false
-	}
-	select {
-	case <-c.done:
-		c.mu.Unlock()
-		return false
-	default:
 	}
 
-	c.gracefulClosing = true
+	// Optimistic non-blocking enqueue. The send channel is drained by
+	// WritePump holding the single-writer guarantee; a full buffer means
+	// the writer is wedged and we must close the socket to break the
+	// deadlock rather than silently drop the final frame.
 	select {
 	case c.send <- msg:
+		c.gracefulClosing = true
 		c.mu.Unlock()
 		select {
 		case ok := <-msg.writeResult:
@@ -132,27 +131,30 @@ func (c *Connection) SendAndClose(msg Message) bool {
 		case <-c.done:
 			return false
 		}
-	case <-c.done:
-		c.gracefulClosing = false
-		c.mu.Unlock()
-		return false
 	default:
-		c.gracefulClosing = false
-		conn := c.closeLocked()
-		c.mu.Unlock()
-		closeWebSocket(conn)
-		return false
 	}
+
+	// Backpressure: close the socket immediately. The close decision and
+	// the socket close both happen under the lock so no other caller can
+	// observe a torn state.
+	conn := c.closeLocked()
+	closeWebSocket(conn)
+	c.mu.Unlock()
+	return false
 }
 
 func (c *Connection) Close() {
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return
+	}
 	if c.gracefulClosing {
-		c.mu.Unlock()
+		// A graceful close is already in flight; the writer will close
+		// the socket via finishClose after the final frame is flushed.
 		return
 	}
 	conn := c.closeLocked()
-	c.mu.Unlock()
 	closeWebSocket(conn)
 }
 
@@ -160,8 +162,11 @@ func (c *Connection) Close() {
 // failures. Unlike Close, it must complete a graceful close already in flight.
 func (c *Connection) finishClose() {
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return
+	}
 	conn := c.closeLocked()
-	c.mu.Unlock()
 	closeWebSocket(conn)
 }
 

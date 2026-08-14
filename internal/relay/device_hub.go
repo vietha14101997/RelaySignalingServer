@@ -117,6 +117,14 @@ func (h *DeviceHub) AddServer(deviceID, userID string, conn *websocket.Conn) (*O
 		done:        make(chan struct{}),
 	}
 	h.onlineServers[deviceID] = server
+	// Close the old server BEFORE we expose the new one to readers/senders outside
+	// the lock. This closes `done` and the socket so any in-flight or subsequent
+	// SendMessage on the old server fails immediately — stale old messages cannot
+	// route to the replacement's window. OnlineServer.Close is non-blocking: it
+	// does NOT acquire writeMu, so holding h.mu here cannot stall a writer.
+	if old != nil {
+		old.Close()
+	}
 	if roomID, ok := h.serverRooms[deviceID]; ok {
 		if room := h.rooms[roomID]; room != nil {
 			room.RebindServer(server)
@@ -140,9 +148,6 @@ func (h *DeviceHub) AddServer(deviceID, userID string, conn *websocket.Conn) (*O
 		}
 	}
 	h.mu.Unlock()
-	if old != nil {
-		old.Close()
-	}
 
 	log.Printf("[DeviceHub] Server %s online (user=%s)", deviceID, userID)
 	for _, r := range resumed {
