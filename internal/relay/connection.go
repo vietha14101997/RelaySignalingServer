@@ -22,12 +22,18 @@ type Connection struct {
 
 	send chan Message
 	done chan struct{}
-	once sync.Once
+	mu   sync.Mutex
+	// gracefulClosing prevents a concurrent Close from dropping a final frame
+	// already accepted by SendAndClose.
+	gracefulClosing bool
+	closed          bool
 }
 
 type Message struct {
-	Type int    // websocket.TextMessage or websocket.BinaryMessage
-	Data []byte
+	Type        int // websocket.TextMessage or websocket.BinaryMessage
+	Data        []byte
+	closeAfter  bool
+	writeResult chan bool
 }
 
 func NewConnection(conn *websocket.Conn, role Role, roomID string) *Connection {
@@ -42,7 +48,7 @@ func NewConnection(conn *websocket.Conn, role Role, roomID string) *Connection {
 }
 
 func (c *Connection) WritePump() {
-	defer c.Close()
+	defer c.finishClose()
 
 	for {
 		select {
@@ -53,6 +59,15 @@ func (c *Connection) WritePump() {
 			}
 			c.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if err := c.Conn.WriteMessage(msg.Type, msg.Data); err != nil {
+				if msg.writeResult != nil {
+					msg.writeResult <- false
+				}
+				return
+			}
+			if msg.writeResult != nil {
+				msg.writeResult <- true
+			}
+			if msg.closeAfter {
 				return
 			}
 		case <-c.done:
@@ -62,21 +77,109 @@ func (c *Connection) WritePump() {
 }
 
 func (c *Connection) Send(msg Message) bool {
+	c.mu.Lock()
+	if c.gracefulClosing {
+		c.mu.Unlock()
+		return false
+	}
+	select {
+	case <-c.done:
+		c.mu.Unlock()
+		return false
+	default:
+	}
+
 	select {
 	case c.send <- msg:
+		c.mu.Unlock()
 		return true
+	case <-c.done:
+		c.mu.Unlock()
+		return false
 	default:
 		// Buffer full, drop connection
-		c.Close()
+		conn := c.closeLocked()
+		c.mu.Unlock()
+		closeWebSocket(conn)
+		return false
+	}
+}
+
+// SendAndClose waits for the writer pump to flush a final message before it
+// closes the socket. It returns false if closure won admission or writing failed.
+func (c *Connection) SendAndClose(msg Message) bool {
+	msg.closeAfter = true
+	msg.writeResult = make(chan bool)
+	c.mu.Lock()
+	if c.gracefulClosing {
+		c.mu.Unlock()
+		return false
+	}
+	select {
+	case <-c.done:
+		c.mu.Unlock()
+		return false
+	default:
+	}
+
+	c.gracefulClosing = true
+	select {
+	case c.send <- msg:
+		c.mu.Unlock()
+		select {
+		case ok := <-msg.writeResult:
+			return ok
+		case <-c.done:
+			return false
+		}
+	case <-c.done:
+		c.gracefulClosing = false
+		c.mu.Unlock()
+		return false
+	default:
+		c.gracefulClosing = false
+		conn := c.closeLocked()
+		c.mu.Unlock()
+		closeWebSocket(conn)
 		return false
 	}
 }
 
 func (c *Connection) Close() {
-	c.once.Do(func() {
-		close(c.done)
-		c.Conn.Close()
-	})
+	c.mu.Lock()
+	if c.gracefulClosing {
+		c.mu.Unlock()
+		return
+	}
+	conn := c.closeLocked()
+	c.mu.Unlock()
+	closeWebSocket(conn)
+}
+
+// finishClose is used by the writer after a graceful final frame and by write
+// failures. Unlike Close, it must complete a graceful close already in flight.
+func (c *Connection) finishClose() {
+	c.mu.Lock()
+	conn := c.closeLocked()
+	c.mu.Unlock()
+	closeWebSocket(conn)
+}
+
+// closeLocked publishes the close decision while enqueue admission is locked.
+// A successful SendAndClose therefore always linearizes before this decision.
+func (c *Connection) closeLocked() *websocket.Conn {
+	if c.closed {
+		return nil
+	}
+	c.closed = true
+	close(c.done)
+	return c.Conn
+}
+
+func closeWebSocket(conn *websocket.Conn) {
+	if conn != nil {
+		conn.Close()
+	}
 }
 
 func (c *Connection) Done() <-chan struct{} {

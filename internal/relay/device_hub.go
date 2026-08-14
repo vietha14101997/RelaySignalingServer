@@ -14,9 +14,10 @@ type OnlineServer struct {
 	UserID      string
 	Conn        *websocket.Conn
 	OnlineSince time.Time
-	send        chan []byte
+	Generation  uint64
 	done        chan struct{}
 	once        sync.Once
+	writeMu     sync.Mutex
 }
 
 type Session struct {
@@ -59,6 +60,7 @@ type DeviceHub struct {
 	sessions      map[string]*Session      // sessionID -> session
 	rooms         map[string]*Room         // roomID -> room
 	serverRooms   map[string]string        // deviceID -> roomID (1:1)
+	serverGen     uint64
 	mu            sync.RWMutex
 
 	// Phase 2 signaling resilience (see session_grace.go).
@@ -78,36 +80,48 @@ func NewDeviceHub() *DeviceHub {
 
 // AddServer registers deviceID's presence connection for userID.
 //
-// Phase 2 resume: if deviceID has a server-stale session (host WS dropped,
-// still within its grace window), the reconnecting userID MUST match that
-// session's OwnerUserID (F12b) — otherwise the connection is rejected with
-// ErrNotOwner rather than silently taking over. On a successful match, the
-// stale session(s) for deviceID are rebound to the new connection instead of
-// being torn down, and room_ready is re-announced to both sides.
+// The reconnecting userID must match all in-memory state for deviceID. On a
+// successful same-owner replacement, rooms and all legacy sessions are rebound
+// before the old connection is closed; stale session grace is also cancelled.
 func (h *DeviceHub) AddServer(deviceID, userID string, conn *websocket.Conn) (*OnlineServer, error) {
 	h.mu.Lock()
 
-	for _, sess := range h.sessions {
-		if sess.DeviceID == deviceID && sess.serverStale && sess.OwnerUserID != userID {
+	old := h.onlineServers[deviceID]
+	if old != nil && old.UserID != userID {
+		h.mu.Unlock()
+		conn.Close()
+		return nil, ErrNotOwner
+	}
+	if roomID, ok := h.serverRooms[deviceID]; ok {
+		if room := h.rooms[roomID]; room != nil && room.OwnerUserID != userID {
 			h.mu.Unlock()
+			conn.Close()
+			return nil, ErrNotOwner
+		}
+	}
+	for _, sess := range h.sessions {
+		if sess.DeviceID == deviceID && sess.OwnerUserID != userID {
+			h.mu.Unlock()
+			conn.Close()
 			return nil, ErrNotOwner
 		}
 	}
 
-	// Close existing connection for same device (e.g. overlapping reconnect)
-	if old, ok := h.onlineServers[deviceID]; ok {
-		old.Close()
-	}
-
+	h.serverGen++
 	server := &OnlineServer{
 		DeviceID:    deviceID,
 		UserID:      userID,
 		Conn:        conn,
 		OnlineSince: time.Now(),
-		send:        make(chan []byte, 64),
+		Generation:  h.serverGen,
 		done:        make(chan struct{}),
 	}
 	h.onlineServers[deviceID] = server
+	if roomID, ok := h.serverRooms[deviceID]; ok {
+		if room := h.rooms[roomID]; room != nil {
+			room.RebindServer(server)
+		}
+	}
 
 	// Snapshot ClientConn under the lock (R1): notifySessionResumed does network
 	// I/O outside the lock, and a concurrent MarkClientStale can nil ClientConn.
@@ -117,13 +131,18 @@ func (h *DeviceHub) AddServer(deviceID, userID string, conn *websocket.Conn) (*O
 	}
 	var resumed []resumeItem
 	for _, sess := range h.sessions {
-		if sess.DeviceID == deviceID && sess.serverStale {
+		if sess.DeviceID == deviceID {
 			sess.ServerConn = server
-			h.cancelServerGraceLocked(sess)
+			if sess.serverStale {
+				h.cancelServerGraceLocked(sess)
+			}
 			resumed = append(resumed, resumeItem{sess: sess, client: sess.ClientConn})
 		}
 	}
 	h.mu.Unlock()
+	if old != nil {
+		old.Close()
+	}
 
 	log.Printf("[DeviceHub] Server %s online (user=%s)", deviceID, userID)
 	for _, r := range resumed {
@@ -323,12 +342,18 @@ func (h *DeviceHub) CleanupStaleSessions(maxAge time.Duration) {
 // --- OnlineServer methods ---
 
 func (s *OnlineServer) SendMessage(msgType int, data []byte) bool {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	select {
 	case <-s.done:
 		return false
 	default:
 	}
 
+	if s.Conn == nil {
+		return false
+	}
 	s.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	err := s.Conn.WriteMessage(msgType, data)
 	return err == nil
@@ -345,7 +370,11 @@ func (s *OnlineServer) SendJSON(v interface{}) bool {
 func (s *OnlineServer) Close() {
 	s.once.Do(func() {
 		close(s.done)
-		s.Conn.Close()
+		if s.Conn != nil {
+			// Gorilla permits Close concurrently with all other methods. Closing
+			// here interrupts both pumps without waiting behind a blocked writer.
+			s.Conn.Close()
+		}
 	})
 }
 
@@ -449,6 +478,9 @@ func (h *DeviceHub) CreateRoom(deviceID, ownerUserID string) (*Room, error) {
 	if !ok {
 		return nil, ErrServerOffline
 	}
+	if server.UserID != ownerUserID {
+		return nil, ErrNotOwner
+	}
 
 	// One room per server
 	if _, exists := h.serverRooms[deviceID]; exists {
@@ -498,6 +530,7 @@ func (h *DeviceHub) RemoveRoom(roomID string) {
 	h.mu.Lock()
 	room, ok := h.rooms[roomID]
 	if ok {
+		room.markClosed()
 		delete(h.rooms, roomID)
 		delete(h.serverRooms, room.DeviceID)
 	}
@@ -513,4 +546,20 @@ func (h *DeviceHub) RoomCount() int {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return len(h.rooms)
+}
+
+func (h *DeviceHub) CleanupRoomAdmissions() int {
+	h.mu.RLock()
+	rooms := make([]*Room, 0, len(h.rooms))
+	for _, room := range h.rooms {
+		rooms = append(rooms, room)
+	}
+	h.mu.RUnlock()
+
+	now := time.Now()
+	removed := 0
+	for _, room := range rooms {
+		removed += room.PruneExpiredAdmissions(now)
+	}
+	return removed
 }

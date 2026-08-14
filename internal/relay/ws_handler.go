@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -11,14 +12,20 @@ import (
 	"github.com/reka/relay-server/internal/auth"
 )
 
+type DeviceOwnerChecker interface {
+	IsOwner(ctx context.Context, deviceID, userID string) (bool, error)
+}
+
 type WSHandler struct {
 	deviceHub      *DeviceHub
+	deviceOwners   DeviceOwnerChecker
 	maxMessageSize int64
 }
 
-func NewWSHandler(deviceHub *DeviceHub, maxMessageSize int64) *WSHandler {
+func NewWSHandler(deviceHub *DeviceHub, deviceOwners DeviceOwnerChecker, maxMessageSize int64) *WSHandler {
 	return &WSHandler{
 		deviceHub:      deviceHub,
+		deviceOwners:   deviceOwners,
 		maxMessageSize: maxMessageSize,
 	}
 }
@@ -30,6 +37,14 @@ func (h *WSHandler) HandleServerWS(c echo.Context) error {
 
 	if deviceID == "" {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "device_id required"})
+	}
+	owned, err := h.deviceOwners.IsOwner(c.Request().Context(), deviceID, userID)
+	if err != nil {
+		log.Printf("[WS/Server] Device ownership lookup failed device=%s user=%s: %v", deviceID, userID, err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to verify device ownership"})
+	}
+	if !owned {
+		return c.JSON(http.StatusForbidden, map[string]string{"error": "not authorized for this device"})
 	}
 
 	ws, err := upgrader.Upgrade(c.Response(), c.Request(), nil)
@@ -83,23 +98,42 @@ func (h *WSHandler) serverReadPump(server *OnlineServer) {
 		}
 		server.Conn.SetReadDeadline(time.Now().Add(90 * time.Second))
 
-		// Route message: check for Room first, fallback to legacy Session
-		room := h.deviceHub.GetRoomByDevice(server.DeviceID)
-		if room != nil {
-			h.routeServerMessage(room, msgType, data)
-			continue
+		if !h.routeCurrentServerMessage(server, msgType, data) {
+			return
 		}
-
-		// Legacy session fallback (backward compatibility)
-		h.deviceHub.mu.RLock()
-		for _, sess := range h.deviceHub.sessions {
-			if sess.DeviceID == server.DeviceID && sess.ClientConn != nil {
-				sess.ClientConn.Send(Message{Type: msgType, Data: data})
-				break
-			}
-		}
-		h.deviceHub.mu.RUnlock()
 	}
+}
+
+// routeCurrentServerMessage keeps the server identity check and enqueue under
+// the hub read lock. Replacement either happens after this frame is routed or
+// first makes server stale, in which case the frame is rejected.
+func (h *WSHandler) routeCurrentServerMessage(server *OnlineServer, msgType int, data []byte) bool {
+	h.deviceHub.mu.RLock()
+	defer h.deviceHub.mu.RUnlock()
+	select {
+	case <-server.done:
+		return false
+	default:
+	}
+	if h.deviceHub.onlineServers[server.DeviceID] != server {
+		return false
+	}
+
+	if roomID, ok := h.deviceHub.serverRooms[server.DeviceID]; ok {
+		if room := h.deviceHub.rooms[roomID]; room != nil {
+			h.routeServerMessage(room, msgType, data)
+			return true
+		}
+	}
+
+	// Legacy session fallback (backward compatibility).
+	for _, sess := range h.deviceHub.sessions {
+		if sess.DeviceID == server.DeviceID && sess.ClientConn != nil {
+			sess.ClientConn.Send(Message{Type: msgType, Data: data})
+			break
+		}
+	}
+	return true
 }
 
 // routeServerMessage routes a server message to room clients.
@@ -182,7 +216,7 @@ func (h *WSHandler) clientReadPump(conn *Connection, sessionID string) {
 		// within the grace window (HandleClientWS -> SetSessionClient), the
 		// timer is cancelled and no peer_disconnected is ever sent. Otherwise
 		// the timer runs the equivalent of the old immediate teardown.
-		h.deviceHub.MarkClientStale(sessionID)
+		h.deviceHub.MarkClientStale(sessionID, conn)
 		conn.Close()
 		log.Printf("[WS/Client] Client disconnected from session %s (grace started)", sessionID)
 	}()

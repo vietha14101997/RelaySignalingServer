@@ -313,7 +313,7 @@ func TestClientDropGraceKeepsSessionThenTearsDown(t *testing.T) {
 	hub.SetSessionClient(sess.ID, clientConn)
 
 	// Simulate the client WS dropping — what clientReadPump's defer does.
-	hub.MarkClientStale(sess.ID)
+	hub.MarkClientStale(sess.ID, clientConn)
 
 	// Check the session survives the grace window BEFORE consuming any reads
 	// on serverObserver — gorilla/websocket permanently caches the first read
@@ -359,7 +359,7 @@ func TestClientReconnectWithinGraceCancelsTeardown(t *testing.T) {
 	go clientConn1.WritePump()
 	hub.SetSessionClient(sess.ID, clientConn1)
 
-	hub.MarkClientStale(sess.ID) // simulate drop
+	hub.MarkClientStale(sess.ID, clientConn1) // simulate drop
 
 	// Reconnect within grace — what HandleClientWS does on ?session= resume.
 	clientHubSide2, _, cleanupClient2 := wsConnPair(t)
@@ -377,6 +377,70 @@ func TestClientReconnectWithinGraceCancelsTeardown(t *testing.T) {
 	}
 	if _, err := readMessageType(t, serverObserver, 50*time.Millisecond); err == nil {
 		t.Error("peer_disconnected should NOT be sent after a successful reconnect within grace")
+	}
+}
+
+func TestOldClientPumpCannotClearReplacementConnection(t *testing.T) {
+	hub := NewDeviceHubWithGrace(50*time.Millisecond, 100)
+	serverHubSide, _, cleanupServer := wsConnPair(t)
+	defer cleanupServer()
+	if _, err := hub.AddServer("device-1", "user-1", serverHubSide); err != nil {
+		t.Fatalf("AddServer failed: %v", err)
+	}
+	sess, err := hub.CreateSession("user-1", "device-1")
+	if err != nil {
+		t.Fatalf("CreateSession failed: %v", err)
+	}
+
+	client1 := NewConnection(nil, RoleClient, sess.ID)
+	hub.SetSessionClient(sess.ID, client1)
+	client2 := NewConnection(nil, RoleClient, sess.ID)
+	hub.SetSessionClient(sess.ID, client2)
+
+	if hub.MarkClientStale(sess.ID, client1) {
+		t.Fatal("superseded client connection marked the session stale")
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	current := hub.GetSession(sess.ID)
+	if current == nil {
+		t.Fatal("old client cleanup removed the session after replacement")
+	}
+	if current.ClientConn != client2 || current.clientStale {
+		t.Fatal("old client cleanup cleared or staled the replacement connection")
+	}
+}
+
+func TestAddServerRebindsActiveLegacySession(t *testing.T) {
+	hub := NewDeviceHub()
+	serverHubSide1, _, cleanupServer1 := wsConnPair(t)
+	defer cleanupServer1()
+	server1, err := hub.AddServer("device-1", "user-1", serverHubSide1)
+	if err != nil {
+		t.Fatalf("AddServer failed: %v", err)
+	}
+	sess, err := hub.CreateSession("user-1", "device-1")
+	if err != nil {
+		t.Fatalf("CreateSession failed: %v", err)
+	}
+
+	serverHubSide2, serverObserver2, cleanupServer2 := wsConnPair(t)
+	defer cleanupServer2()
+	server2, err := hub.AddServer("device-1", "user-1", serverHubSide2)
+	if err != nil {
+		t.Fatalf("replacement AddServer failed: %v", err)
+	}
+	if sess.ServerConn != server2 || sess.ServerConn == server1 {
+		t.Fatal("active legacy session was not rebound to replacement server")
+	}
+	if !hub.ForwardToServer(sess.ID, websocket.TextMessage, []byte(`{"type":"replacement"}`)) {
+		t.Fatal("legacy session failed to forward through replacement server")
+	}
+	if got, err := readMessageType(t, serverObserver2, time.Second); err != nil || got != "room_ready" {
+		t.Fatalf("replacement server did not receive rebound session state: type=%q err=%v", got, err)
+	}
+	if got, err := readMessageType(t, serverObserver2, time.Second); err != nil || got != "replacement" {
+		t.Fatalf("replacement server did not receive legacy message: type=%q err=%v", got, err)
 	}
 }
 
@@ -503,6 +567,7 @@ func TestStaleSessionCapEvictsOldest(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CreateSession failed: %v", err)
 		}
+		hub.SetSessionClient(sess.ID, NewConnection(nil, RoleClient, sess.ID))
 		return sess
 	}
 
@@ -510,11 +575,11 @@ func TestStaleSessionCapEvictsOldest(t *testing.T) {
 	sess2 := makeSession("device-2", "user-2")
 	sess3 := makeSession("device-3", "user-3")
 
-	hub.MarkClientStale(sess1.ID)
+	hub.MarkClientStale(sess1.ID, sess1.ClientConn)
 	time.Sleep(15 * time.Millisecond)
-	hub.MarkClientStale(sess2.ID)
+	hub.MarkClientStale(sess2.ID, sess2.ClientConn)
 	time.Sleep(15 * time.Millisecond)
-	hub.MarkClientStale(sess3.ID) // 3rd stale entry exceeds cap of 2 -> evicts sess1 (oldest)
+	hub.MarkClientStale(sess3.ID, sess3.ClientConn) // 3rd stale entry exceeds cap of 2 -> evicts sess1 (oldest)
 
 	if hub.GetSession(sess1.ID) != nil {
 		t.Error("oldest stale session should have been evicted once the cap was exceeded")
@@ -639,7 +704,7 @@ func TestConcurrentServerResumeVsClientStaleNoRace(t *testing.T) {
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() { defer wg.Done(); hub.AddServer("device-1", "user-1", newServerHubSide) }()
-		go func() { defer wg.Done(); hub.MarkClientStale(sess.ID) }()
+		go func() { defer wg.Done(); hub.MarkClientStale(sess.ID, clientConn) }()
 		wg.Wait()
 
 		cleanupServer()

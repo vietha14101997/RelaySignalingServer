@@ -74,14 +74,14 @@ func generateSessionID() string {
 
 // --- Client-side grace (F2) ---
 
-// MarkClientStale marks sessionID's client side as stale and starts (or
-// restarts) its grace timer. Called from the client WS read pump's defer
-// instead of immediately removing the session. Returns false if the session
-// no longer exists.
-func (h *DeviceHub) MarkClientStale(sessionID string) bool {
+// MarkClientStale marks sessionID's client side as stale only when expected is
+// still the bound connection. This prevents an old read pump from clearing a
+// newer connection after a reconnect. Returns false when the session no longer
+// exists or expected has already been superseded.
+func (h *DeviceHub) MarkClientStale(sessionID string, expected *Connection) bool {
 	h.mu.Lock()
 	sess, ok := h.sessions[sessionID]
-	if !ok {
+	if !ok || sess.ClientConn != expected {
 		h.mu.Unlock()
 		return false
 	}

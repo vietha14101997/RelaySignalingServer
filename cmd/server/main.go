@@ -53,7 +53,6 @@ func main() {
 	hub := relay.NewHub()
 	deviceHub := relay.NewDeviceHubWithGrace(cfg.SessionGrace, cfg.MaxStaleSessions)
 	jwtService := auth.NewJWTService(cfg.JWTSecret, cfg.AccessTokenTTL)
-	wsHandler := relay.NewWSHandler(deviceHub, cfg.MaxMessageSize)
 	legacyWSHandler := relay.NewHandler(hub, cfg.MaxMessageSize)
 	turnHandler := turn.NewHandler(cfg)
 	healthHandler := health.NewHandler(
@@ -77,6 +76,7 @@ func main() {
 	if pool != nil {
 		authRepo := auth.NewRepository(pool)
 		deviceRepo := device.NewRepository(pool)
+		wsHandler := relay.NewWSHandler(deviceHub, deviceRepo, cfg.MaxMessageSize)
 		authHandler := auth.NewHandler(authRepo, jwtService, cfg.RefreshTokenTTL)
 		deviceHandler := device.NewHandler(deviceRepo, deviceHub)
 		sessionHandler := session.NewHandler(deviceHub)
@@ -151,6 +151,7 @@ func main() {
 		for range ticker.C {
 			hub.CleanupStaleRooms(time.Duration(cfg.RoomIdleTimeout) * time.Second)
 			deviceHub.CleanupStaleSessions(5 * time.Minute)
+			deviceHub.CleanupRoomAdmissions()
 			guestLimiter.Cleanup()
 			roomLimiter.Cleanup()
 			// H1: the public /telemetry/connection endpoint leaves a per-IP limiter

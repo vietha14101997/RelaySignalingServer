@@ -23,9 +23,9 @@ type Device struct {
 	HWInfo       json.RawMessage `json:"hw_info,omitempty"`
 	RegisteredAt time.Time       `json:"registered_at"`
 	LastSeenAt   time.Time       `json:"last_seen_at"`
-	Online       bool            `json:"online"`                  // populated from in-memory state
-	RoomID       string          `json:"room_id,omitempty"`       // populated from DeviceHub
-	DisplayID    string          `json:"display_id,omitempty"`    // formatted room_id (e.g. "ABC-DEF")
+	Online       bool            `json:"online"`               // populated from in-memory state
+	RoomID       string          `json:"room_id,omitempty"`    // populated from DeviceHub
+	DisplayID    string          `json:"display_id,omitempty"` // formatted room_id (e.g. "ABC-DEF")
 }
 
 type Repository struct {
@@ -91,6 +91,15 @@ func (r *Repository) FindDevice(ctx context.Context, deviceID string) (*Device, 
 		return nil, ErrDeviceNotFound
 	}
 	return d, err
+}
+
+func (r *Repository) IsOwner(ctx context.Context, deviceID, userID string) (bool, error) {
+	var owns bool
+	err := r.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM devices WHERE id = $1 AND user_id = $2)`,
+		deviceID, userID,
+	).Scan(&owns)
+	return owns, err
 }
 
 func (r *Repository) UpdateLastSeen(ctx context.Context, deviceID string) error {

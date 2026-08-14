@@ -15,4 +15,5 @@ var (
 	ErrRoomFull            = errors.New("room is full")
 	ErrRoomAlreadyExists   = errors.New("server already has a room")
 	ErrInvalidRoomPassword = errors.New("invalid room password")
+	ErrClientNotAdmitted   = errors.New("client is not admitted to room")
 )

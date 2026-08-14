@@ -127,15 +127,23 @@ func (h *Handler) Join(c echo.Context) error {
 		}
 	}
 
-	if room.IsFull() {
-		return c.JSON(http.StatusConflict, map[string]string{"error": "room is full"})
-	}
-
-	role := room.DetermineRole(userID)
 	clientID := uuid.New().String()
+	client := &relay.RoomClient{
+		ID:           clientID,
+		UserID:       userID,
+		InputAllowed: false,
+		JoinedAt:     time.Now(),
+	}
+	if err := room.ReserveClient(client); err != nil {
+		if err == relay.ErrRoomFull {
+			return c.JSON(http.StatusConflict, map[string]string{"error": "room is full"})
+		}
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "room not found"})
+	}
+	role := client.Role
 
 	// Notify server about new client joining
-	room.ServerConn.SendJSON(map[string]interface{}{
+	room.SendJSONToServer(map[string]interface{}{
 		"type":      "client_joining",
 		"client_id": clientID,
 		"role":      string(role),
@@ -159,7 +167,6 @@ func (h *Handler) GetInfo(c echo.Context) error {
 	if room == nil {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "room not found"})
 	}
-
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"room_id":     roomID,
 		"display_id":  room.DisplayID(),
@@ -183,6 +190,9 @@ func (h *Handler) HandleRoomWS(c echo.Context) error {
 	if room == nil {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "room not found"})
 	}
+	if !room.HasValidAdmission(clientID) {
+		return c.JSON(http.StatusForbidden, map[string]string{"error": "client is not admitted to room"})
+	}
 
 	ws, err := upgrader.Upgrade(c.Response(), c.Request(), nil)
 	if err != nil {
@@ -193,24 +203,12 @@ func (h *Handler) HandleRoomWS(c echo.Context) error {
 	conn := relay.NewConnection(ws, relay.RoleClient, roomID)
 	go conn.WritePump()
 
-	// Find or create room client with pre-assigned role from /rooms/join
-	role := relay.RoleViewer
-	if room.ClientCount() == 0 && room.OwnerUserID == "" {
-		role = relay.RoleHost
-	}
-
-	client := &relay.RoomClient{
-		ID:           clientID,
-		Role:         role,
-		Conn:         conn,
-		InputAllowed: role == relay.RoleHost,
-		JoinedAt:     time.Now(),
-	}
-
-	if err := room.AddClient(client); err != nil {
+	client, err := room.AttachClient(clientID, conn)
+	if err != nil {
 		conn.Close()
 		return nil
 	}
+	role := client.Role
 
 	// Notify both sides
 	readyMsg, _ := json.Marshal(map[string]interface{}{
@@ -221,7 +219,7 @@ func (h *Handler) HandleRoomWS(c echo.Context) error {
 		"state":     string(room.GetState()),
 	})
 	conn.Send(relay.Message{Type: websocket.TextMessage, Data: readyMsg})
-	room.ServerConn.SendJSON(map[string]interface{}{
+	room.SendJSONToServer(map[string]interface{}{
 		"type":      "room_ready",
 		"room_id":   roomID,
 		"client_id": clientID,
@@ -237,12 +235,13 @@ func (h *Handler) HandleRoomWS(c echo.Context) error {
 
 func (h *Handler) clientReadPump(conn *relay.Connection, room *relay.Room, clientID string) {
 	defer func() {
-		room.RemoveClient(clientID)
-		room.ServerConn.SendJSON(map[string]string{
-			"type":      "client_left",
-			"client_id": clientID,
-			"room_id":   room.ID,
-		})
+		if room.RemoveClient(clientID, conn) {
+			room.SendJSONToServer(map[string]string{
+				"type":      "client_left",
+				"client_id": clientID,
+				"room_id":   room.ID,
+			})
+		}
 		conn.Close()
 		log.Printf("[WS/Room] Client %s disconnected from room %s", clientID, room.ID)
 	}()
@@ -277,7 +276,7 @@ func (h *Handler) clientReadPump(conn *relay.Connection, room *relay.Room, clien
 		}
 
 		// Forward to server
-		room.ServerConn.SendMessage(msgType, data)
+		room.SendToServer(msgType, data)
 	}
 }
 
